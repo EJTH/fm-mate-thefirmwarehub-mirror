@@ -86,6 +86,24 @@ def save_catalog(path, content):
             temporary.unlink(missing_ok=True)
 
 
+def fetch_catalog(mirror_dir):
+    today = date.today().isoformat()
+    date_path = mirror_dir / ".catalog-fetch-date"
+    pending_path = mirror_dir / ".catalog-pending.json"
+    if date_path.exists() and date_path.read_text(encoding="utf-8") == today:
+        if not pending_path.exists():
+            raise ValueError("catalog fetch already attempted today without a saved response")
+        return pending_path.read_bytes()
+
+    pending_path.unlink(missing_ok=True)
+    save_catalog(date_path, today.encode())
+    with urlopen(f"{BASE_URL}/catalog.json?{today}", timeout=60) as response:
+        content = response.read()
+    firmware_list(json.loads(content))
+    save_catalog(pending_path, content)
+    return content
+
+
 def mirror(mirror_dir=MIRROR_DIR):
     mirror_dir = Path(mirror_dir)
     mirror_dir.mkdir(parents=True, exist_ok=True)
@@ -95,39 +113,51 @@ def mirror(mirror_dir=MIRROR_DIR):
         with catalog_path.open(encoding="utf-8") as source:
             previous = {str(item["id"]): firmware_sha256(item) for item in firmware_list(json.load(source))}
 
-    with urlopen(f"{BASE_URL}/catalog.json?{date.today().isoformat()}", timeout=60) as response:
-        content = response.read()
+    content = fetch_catalog(mirror_dir)
     firmwares = firmware_list(json.loads(content))
 
     failed = False
-    for firmware in firmwares:
-        try:
-            firmware_id = str(firmware["id"])
-            sha256 = firmware_sha256(firmware)
-            if previous.get(firmware_id) == sha256:
-                continue
+    with tempfile.TemporaryDirectory(prefix=".staging-", dir=mirror_dir) as temporary:
+        staging = Path(temporary)
+        for firmware in firmwares:
+            try:
+                firmware_id = str(firmware["id"])
+                sha256 = firmware_sha256(firmware)
+                if previous.get(firmware_id) == sha256:
+                    continue
 
-            card = firmware.get("card")
-            if card:
-                try:
-                    download_asset(mirror_dir, card)
-                except HTTPError as error:
-                    if error.code != 404:
-                        raise
-                    card = None
-            if not card:
-                if not re.fullmatch(r"[A-Za-z0-9_-]+", firmware_id):
-                    raise ValueError(f"invalid firmware id for fallback card: {firmware_id!r}")
-                download_asset(mirror_dir, f"img/w0/{firmware_id}.webp")
-            download_asset(mirror_dir, firmware["pkg"], sha256)
-        except (KeyError, TypeError, ValueError, OSError, URLError) as error:
-            LOG.error("Failed to mirror firmware %s: %s", firmware.get("id", "<unknown>"), error)
-            failed = True
+                card = firmware.get("card")
+                if card:
+                    try:
+                        download_asset(staging, card)
+                    except HTTPError as error:
+                        if error.code != 404:
+                            raise
+                        card = None
+                if not card:
+                    if not re.fullmatch(r"[A-Za-z0-9_-]+", firmware_id):
+                        raise ValueError(f"invalid firmware id for fallback card: {firmware_id!r}")
+                    download_asset(staging, f"img/w0/{firmware_id}.webp")
+                download_asset(staging, firmware["pkg"], sha256)
+            except (KeyError, TypeError, ValueError, OSError, URLError) as error:
+                LOG.error("Failed to mirror firmware %s: %s", firmware.get("id", "<unknown>"), error)
+                failed = True
 
-    if failed:
-        LOG.error("Catalog was not updated; failed firmware will be retried on the next run")
-        return False
-    save_catalog(catalog_path, content)
+        if failed:
+            LOG.error("Catalog was not updated; failed firmware will be retried on the next run")
+            return False
+        assets = []
+        for asset in staging.rglob("*"):
+            if asset.is_file():
+                relative = asset.relative_to(staging).as_posix()
+                _, destination = asset_location(mirror_dir, quote(relative, safe="/"))
+                if destination in (catalog_path, mirror_dir / ".catalog-fetch-date", mirror_dir / ".catalog-pending.json"):
+                    raise ValueError(f"asset path conflicts with catalog state: {relative}")
+                assets.append((asset, destination))
+        for asset, destination in assets:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(asset, destination)
+        save_catalog(catalog_path, content)
     return True
 
 
