@@ -6,10 +6,7 @@ The script creates `mirror/`, fetches the catalog with today's date as a cache
 buster, and saves the catalog and assets under their original paths. If a card
 is missing or returns HTTP 404, it uses `img/w0/<id>.webp` instead.
 
-The catalog is requested at most once per day, in accordance with
 [The Firmware Hub's catalog rules](https://thefirmwarehub.com/kb/#catalog).
-Repeated runs reuse that day's downloaded catalog. If the catalog request fails,
-try again the following day.
 
 On subsequent runs, only new firmware or firmware with a changed SHA-256 is
 downloaded. Packages are verified before replacing existing files. Errors,
