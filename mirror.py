@@ -11,22 +11,25 @@ import tempfile
 from datetime import date
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote, urlsplit
-from urllib.request import urlopen
-
+from urllib.request import urlopen, Request
+from time import sleep
 
 BASE_URL = "https://thefirmwarehub.com"
 MIRROR_DIR = Path("mirror")
 LOG = logging.getLogger(__name__)
-
+AGENT_STRING = "FM-MATE-mirror (local test)";
 
 def firmware_list(catalog):
     if not isinstance(catalog, dict):
+        LOG.error("Invalid catalog object: %s", catalog)
         raise ValueError("catalog must be an object")
     data = catalog.get("data", catalog)
     if not isinstance(data, dict):
+        LOG.error("Invalid catalog data: %s", data)
         raise ValueError("catalog data must be an object")
     firmwares = data["firmwares"]
     if not isinstance(firmwares, list) or not all(isinstance(item, dict) for item in firmwares):
+        LOG.error("Invalid firmwares list: %s", firmwares)
         raise ValueError("firmwares must be a list of objects")
     return firmwares
 
@@ -59,7 +62,7 @@ def download_asset(mirror_dir, path, expected_sha256=None):
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
-        with urlopen(url, timeout=60) as response:
+        with urlopen(Request(url, headers={'User-Agent': AGENT_STRING})) as response:
             with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as output:
                 temporary = Path(output.name)
                 digest = hashlib.sha256()
@@ -69,7 +72,9 @@ def download_asset(mirror_dir, path, expected_sha256=None):
         if expected_sha256 and digest.hexdigest() != expected_sha256.lower():
             raise ValueError(f"SHA-256 mismatch for {path}: expected {expected_sha256}, got {digest.hexdigest()}")
         os.replace(temporary, destination)
+        LOG.info(f"Downloaded asset {path} to {destination}");
     finally:
+        sleep(0.5);
         if temporary is not None:
             temporary.unlink(missing_ok=True)
 
@@ -91,16 +96,16 @@ def fetch_catalog(mirror_dir):
     date_path = mirror_dir / ".catalog-fetch-date"
     pending_path = mirror_dir / ".catalog-pending.json"
     if date_path.exists() and date_path.read_text(encoding="utf-8") == today:
-        if not pending_path.exists():
-            raise ValueError("catalog fetch already attempted today without a saved response")
         return pending_path.read_bytes()
 
     pending_path.unlink(missing_ok=True)
     save_catalog(date_path, today.encode())
-    with urlopen(f"{BASE_URL}/catalog.json?{today}", timeout=60) as response:
+    with urlopen(Request(f"{BASE_URL}/catalog.json?{today}", headers={'User-Agent': AGENT_STRING})) as response:
         content = response.read()
     firmware_list(json.loads(content))
     save_catalog(pending_path, content)
+    LOG.info("Fetched catalog from server");
+    sleep(10);
     return content
 
 
@@ -144,20 +149,22 @@ def mirror(mirror_dir=MIRROR_DIR):
                 failed = True
 
         if failed:
-            LOG.error("Catalog was not updated; failed firmware will be retried on the next run")
-            return False
+            LOG.error("Catalog update was not finished; failed firmware will be retried on the next run")
+
         assets = []
         for asset in staging.rglob("*"):
             if asset.is_file():
                 relative = asset.relative_to(staging).as_posix()
                 _, destination = asset_location(mirror_dir, quote(relative, safe="/"))
                 if destination in (catalog_path, mirror_dir / ".catalog-fetch-date", mirror_dir / ".catalog-pending.json"):
+                    LOG.error("Asset path conflicts with catalog state: %s", relative)
                     raise ValueError(f"asset path conflicts with catalog state: {relative}")
                 assets.append((asset, destination))
         for asset, destination in assets:
             destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(asset, destination)
         save_catalog(catalog_path, content)
+        LOG.info("Catalog successfully updated")
     return True
 
 
