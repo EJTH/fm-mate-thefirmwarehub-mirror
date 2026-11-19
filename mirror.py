@@ -17,7 +17,7 @@ from time import sleep
 BASE_URL = "https://thefirmwarehub.com"
 MIRROR_DIR = Path("mirror")
 LOG = logging.getLogger(__name__)
-AGENT_STRING = "FM-MATE-mirror (local test)";
+AGENT_STRING = "fm-mate-thefirmwarehub-mirror (https://github.com/EJTH/fm-mate-thefirmwarehub-mirror)";
 
 def firmware_list(catalog):
     if not isinstance(catalog, dict):
